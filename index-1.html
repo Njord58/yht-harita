@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>YHT Harita</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root{
+    --amber:#ffb703;
+    --green:#4ade80;
+    --red:#f87171;
+    --panel: rgba(10,16,14,0.86);
+    --line: rgba(255,255,255,0.12);
+    --mono: 'Courier New', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+  html,body{ margin:0; padding:0; height:100%; background:#0c1512; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; overflow:hidden; }
+  #map{ position:absolute; inset:0; background:#0c1512; }
+  .leaflet-tile-pane{ filter: saturate(1.05) contrast(1.05); }
+
+  .overlay{ position:absolute; z-index:500; pointer-events:none; }
+  .overlay * { pointer-events:auto; }
+
+  #topStatus{
+    top:0; left:0; right:0; padding:8px 10px;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.55), transparent);
+    color:#eaf2ec; font-family:var(--mono); font-size:11px; text-align:center;
+  }
+  #topStatus.warn{ color: var(--red); }
+  #topStatus.ok{ color: var(--green); }
+
+  #speedPanel{
+    left:10px; bottom:14px;
+    background: var(--panel);
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:10px 16px;
+    color:#eaf2ec;
+    backdrop-filter: blur(4px);
+  }
+  #speedPanel .lbl{ font-size:9px; letter-spacing:1px; color:#9fb3a8; text-transform:uppercase; }
+  #speedVal{ font-family:var(--mono); font-size:38px; font-weight:bold; color:var(--amber); line-height:1.05; font-variant-numeric:tabular-nums; }
+  #speedPanel .unit{ font-size:11px; color:#9fb3a8; }
+
+  #nextPanel{
+    right:10px; bottom:14px; max-width: 46%;
+    background: var(--panel);
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:10px 14px;
+    color:#eaf2ec;
+    backdrop-filter: blur(4px);
+    text-align:right;
+  }
+  #nextPanel .lbl{ font-size:9px; letter-spacing:1px; color:#9fb3a8; text-transform:uppercase; }
+  #nextPanel .name{ font-size:15px; font-weight:700; margin:2px 0 6px; }
+  #nextPanel .row{ font-family:var(--mono); font-size:12px; color:var(--green); }
+
+  #recenterBtn{
+    right:10px; top: 46px;
+    width:38px; height:38px; border-radius:50%;
+    background: var(--panel); border:1px solid var(--line);
+    color:#eaf2ec; font-size:16px;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+  }
+  #recenterBtn:active{ background: rgba(255,255,255,0.15); }
+
+  .station-dot{ background:#fff; border:2px solid #1a3a2c; border-radius:50%; }
+  .station-label{
+    font-family:var(--mono); font-size:10px; color:#fff; text-shadow:0 0 3px #000,0 0 3px #000;
+    white-space:nowrap;
+  }
+  .user-arrow{
+    width:0; height:0;
+    border-left:8px solid transparent;
+    border-right:8px solid transparent;
+    border-bottom:18px solid var(--red);
+    filter: drop-shadow(0 0 3px rgba(0,0,0,0.7));
+  }
+  .user-dot{
+    width:16px; height:16px; border-radius:50%;
+    background: var(--red); border:2px solid #fff;
+    box-shadow: 0 0 0 6px rgba(248,113,113,0.25);
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="overlay" id="topStatus">başlatılıyor…</div>
+<div class="overlay" id="speedPanel">
+  <div class="lbl">Hız</div>
+  <div id="speedVal">--</div>
+  <div class="unit">km/sa</div>
+</div>
+<div class="overlay" id="nextPanel">
+  <div class="lbl">Sıradaki durak</div>
+  <div class="name" id="nextName">—</div>
+  <div class="row" id="nextDist">-- km</div>
+  <div class="row" id="nextEta">-- dk</div>
+</div>
+<div class="overlay" id="recenterBtn">◎</div>
+
+<script>
+(function(){
+"use strict";
+
+// ---------------- station data (gerçek TCDD YHT durakları) ----------------
+// id: storage/geocode anahtarı, name: ekranda gösterilecek ad, q: geocode sorgusu
+const LINES = [
+  {
+    id: 'ist-ank',
+    name: 'İstanbul – Ankara',
+    stations: [
+      {id:'halkali', name:'Halkalı', q:'Halkalı Garı, İstanbul, Türkiye'},
+      {id:'bakirkoy', name:'Bakırköy', q:'Bakırköy Tren İstasyonu, İstanbul, Türkiye'},
+      {id:'sogutlucesme', name:'Söğütlüçeşme', q:'Söğütlüçeşme Tren İstasyonu, İstanbul, Türkiye'},
+      {id:'bostanci', name:'Bostancı', q:'Bostancı Tren İstasyonu, İstanbul, Türkiye'},
+      {id:'pendik', name:'Pendik', q:'Pendik Tren İstasyonu, İstanbul, Türkiye'},
+      {id:'gebze', name:'Gebze', q:'Gebze Tren İstasyonu, Kocaeli, Türkiye'},
+      {id:'izmit', name:'İzmit Garı', q:'İzmit Garı, Kocaeli, Türkiye'},
+      {id:'arifiye', name:'Arifiye', q:'Arifiye Tren İstasyonu, Sakarya, Türkiye'},
+      {id:'bilecik', name:'Bilecik YHT Garı', q:'Bilecik YHT Garı, Türkiye'},
+      {id:'bozuyuk', name:'Bozüyük YHT Garı', q:'Bozüyük YHT Garı, Bilecik, Türkiye'},
+      {id:'eskisehir', name:'Eskişehir Garı', q:'Eskişehir Garı, Türkiye'},
+      {id:'polatli', name:'Polatlı YHT Garı', q:'Polatlı YHT Garı, Ankara, Türkiye'},
+      {id:'eryaman', name:'Eryaman YHT Garı', q:'Eryaman YHT Garı, Ankara, Türkiye'},
+      {id:'ankara', name:'Ankara YHT Garı', q:'Ankara YHT Garı, Türkiye'}
+    ]
+  },
+  {
+    id: 'ank-siv',
+    name: 'Ankara – Sivas',
+    stations: [
+      {id:'ankara', name:'Ankara YHT Garı', q:'Ankara YHT Garı, Türkiye'},
+      {id:'kayas', name:'Kayaş', q:'Kayaş Tren İstasyonu, Ankara, Türkiye'},
+      {id:'elmadag', name:'Elmadağ YHT Garı', q:'Elmadağ YHT Garı, Ankara, Türkiye'},
+      {id:'kirikkale', name:'Kırıkkale YHT Garı', q:'Kırıkkale YHT Garı, Türkiye'},
+      {id:'yerkoy', name:'Yerköy YHT Garı', q:'Yerköy YHT Garı, Yozgat, Türkiye'},
+      {id:'yozgat', name:'Yozgat YHT Garı', q:'Yozgat YHT Garı, Türkiye'},
+      {id:'sorgun', name:'Sorgun YHT Garı', q:'Sorgun YHT Garı, Yozgat, Türkiye'},
+      {id:'akdagmadeni', name:'Akdağmadeni YHT Garı', q:'Akdağmadeni YHT Garı, Yozgat, Türkiye'},
+      {id:'yildizeli', name:'Yıldızeli YHT Garı', q:'Yıldızeli YHT Garı, Sivas, Türkiye'},
+      {id:'sivas', name:'Sivas Garı', q:'Sivas Garı, Türkiye'}
+    ]
+  }
+];
+
+let coords = {};          // id -> {lat, lon}
+let follow = true;
+let userMarker = null;
+let lastFixes = [];
+let smoothedSpeed = null;
+let lastProgress = {};    // per line id
+let lockedDirection = {}; // per line id
+
+const $ = id => document.getElementById(id);
+
+// ---------------- map setup ----------------
+const map = L.map('map', { zoomControl:false, attributionControl:true }).setView([39.4, 35.5], 6);
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  maxZoom: 18,
+  attribution: 'Esri World Imagery'
+}).addTo(map);
+
+map.on('dragstart', ()=>{ follow = false; });
+$('recenterBtn').addEventListener('click', ()=>{
+  follow = true;
+  if(userMarker) map.setView(userMarker.getLatLng(), Math.max(map.getZoom(),14));
+});
+
+const polylines = {};   // lineId -> L.polyline
+const stationMarkers = {}; // stationId -> L.marker
+
+// ---------------- storage (tarayıcı localStorage - kalıcı, internetsiz de okunur) ----------------
+async function loadCoords(){
+  try{
+    const raw = localStorage.getItem('station_coords');
+    coords = raw ? JSON.parse(raw) : {};
+  }catch(e){ coords = {}; }
+}
+async function saveCoordOne(id, lat, lon){
+  coords[id] = {lat, lon};
+  try{ localStorage.setItem('station_coords', JSON.stringify(coords)); }
+  catch(e){ console.error(e); }
+}
+
+// ---------------- geocoding (only runs when internet available) ----------------
+async function geocodeMissing(){
+  const allStations = [];
+  const seen = new Set();
+  LINES.forEach(l => l.stations.forEach(s=>{
+    if(!seen.has(s.id)){ seen.add(s.id); allStations.push(s); }
+  }));
+  const missing = allStations.filter(s => !coords[s.id]);
+  if(missing.length === 0) return;
+  if(!navigator.onLine){
+    setStatus(`${missing.length} durağın konumu henüz yok — internete bağlanınca otomatik indirilecek`, 'warn');
+    return;
+  }
+  for(const s of missing){
+    if(!navigator.onLine) break;
+    try{
+      const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=tr&q=' + encodeURIComponent(s.q);
+      const r = await fetch(url, { headers: { 'Accept':'application/json' } });
+      const data = await r.json();
+      if(data && data[0]){
+        await saveCoordOne(s.id, parseFloat(data[0].lat), parseFloat(data[0].lon));
+        drawStation(s.id, s.name);
+        drawAllLines();
+      }
+    }catch(e){ /* sessiz geç, sıradaki istasyona devam */ }
+    await new Promise(res=>setTimeout(res, 1100)); // Nominatim hız limiti
+  }
+  fitToStations();
+}
+
+// ---------------- drawing ----------------
+function drawStation(id, name){
+  if(stationMarkers[id] || !coords[id]) return;
+  const c = coords[id];
+  const marker = L.marker([c.lat, c.lon], {
+    icon: L.divIcon({ className:'', html:'<div class="station-dot" style="width:9px;height:9px;"></div>', iconSize:[9,9], iconAnchor:[4,4] })
+  }).addTo(map);
+  marker.bindTooltip(name, { permanent:false, direction:'top', className:'station-label' });
+  stationMarkers[id] = marker;
+}
+
+function drawAllLines(){
+  LINES.forEach(line=>{
+    const pts = line.stations.map(s => coords[s.id]).filter(Boolean).map(c=>[c.lat,c.lon]);
+    // sadece art arda koordinatı olan noktaları birleştir (boşlukları atlamadan olabildiğince çiz)
+    const segments = [];
+    let current = [];
+    line.stations.forEach(s=>{
+      const c = coords[s.id];
+      if(c){ current.push([c.lat, c.lon]); }
+      else if(current.length){ segments.push(current); current = []; }
+    });
+    if(current.length) segments.push(current);
+
+    if(polylines[line.id]){ polylines[line.id].forEach(pl=>map.removeLayer(pl)); }
+    polylines[line.id] = segments.map(seg =>
+      L.polyline(seg, { color:'#3aa0ff', weight:3, opacity:0.85 }).addTo(map)
+    );
+  });
+}
+
+function fitToStations(){
+  const allPts = [];
+  Object.values(coords).forEach(c=> allPts.push([c.lat,c.lon]));
+  if(allPts.length >= 2 && !userMarker){
+    map.fitBounds(allPts, { padding:[30,30] });
+  }
+}
+
+function setStatus(text, cls){
+  const el = $('topStatus');
+  el.textContent = text;
+  el.className = 'overlay' + (cls ? ' '+cls : '');
+}
+
+// ---------------- geo math ----------------
+function haversine(lat1,lon1,lat2,lon2){
+  const R=6371000, toRad=d=>d*Math.PI/180;
+  const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
+  const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(a));
+}
+function toXY(lat,lon,refLat,refLon){
+  return { x:(lon-refLon)*Math.cos(refLat*Math.PI/180)*111320, y:(lat-refLat)*110540 };
+}
+function cumulativeDistances(pts){
+  const cum=[0];
+  for(let i=1;i<pts.length;i++) cum.push(cum[i-1] + haversine(pts[i-1].lat,pts[i-1].lon,pts[i].lat,pts[i].lon));
+  return cum;
+}
+function projectOntoRoute(lat,lon,pts,cum){
+  let best=null;
+  for(let i=0;i<pts.length-1;i++){
+    const a=pts[i], b=pts[i+1];
+    const A=toXY(a.lat,a.lon,a.lat,a.lon), B=toXY(b.lat,b.lon,a.lat,a.lon), P=toXY(lat,lon,a.lat,a.lon);
+    const ABx=B.x-A.x, ABy=B.y-A.y;
+    const len2=ABx*ABx+ABy*ABy || 1e-9;
+    let t=((P.x-A.x)*ABx+(P.y-A.y)*ABy)/len2;
+    t=Math.max(0,Math.min(1,t));
+    const cx=A.x+t*ABx, cy=A.y+t*ABy;
+    const cross=Math.sqrt((P.x-cx)**2+(P.y-cy)**2);
+    const segLen=cum[i+1]-cum[i];
+    const progress=cum[i]+t*segLen;
+    if(best===null || cross<best.crossTrack) best={segIndex:i, t, progress, crossTrack:cross};
+  }
+  return best;
+}
+function fmtKm(m){ return (m==null||isNaN(m)) ? '--' : (m/1000).toFixed(1)+' km'; }
+function fmtEta(s){
+  if(s==null||!isFinite(s)||s<0) return '-- dk';
+  const m=Math.round(s/60);
+  if(m<1) return '<1 dk';
+  if(m<60) return m+' dk';
+  return Math.floor(m/60)+'s '+(m%60)+'dk';
+}
+
+// ---------------- live tracking ----------------
+function updateUserMarker(lat, lon, heading){
+  const html = (heading!=null)
+    ? `<div class="user-arrow" style="transform:rotate(${heading}deg);"></div>`
+    : `<div class="user-dot"></div>`;
+  if(!userMarker){
+    userMarker = L.marker([lat,lon], { icon: L.divIcon({ className:'', html, iconSize:[20,20], iconAnchor:[10,10] }) }).addTo(map);
+  } else {
+    userMarker.setLatLng([lat,lon]);
+    userMarker.setIcon(L.divIcon({ className:'', html, iconSize:[20,20], iconAnchor:[10,10] }));
+  }
+  if(follow) map.setView([lat,lon], Math.max(map.getZoom(), 13), { animate:true });
+}
+
+function onFix(pos){
+  const now = pos.timestamp || Date.now();
+  const {latitude:lat, longitude:lon, speed, heading, accuracy} = pos.coords;
+
+  let instSpeed = (speed!=null && speed>=0) ? speed : null;
+  if(instSpeed===null && lastFixes.length){
+    const prev = lastFixes[lastFixes.length-1];
+    const dt=(now-prev.t)/1000;
+    if(dt>0.5) instSpeed = haversine(prev.lat,prev.lon,lat,lon)/dt;
+  }
+  if(instSpeed!==null) smoothedSpeed = (smoothedSpeed===null) ? instSpeed : smoothedSpeed*0.7+instSpeed*0.3;
+  lastFixes.push({lat,lon,t:now}); if(lastFixes.length>10) lastFixes.shift();
+
+  $('speedVal').textContent = (smoothedSpeed==null) ? '--' : Math.round(smoothedSpeed*3.6);
+  updateUserMarker(lat, lon, (heading!=null && !isNaN(heading)) ? heading : null);
+
+  // en yakın hattı bul
+  let bestLine=null, bestProj=null, bestPts=null, bestCum=null;
+  LINES.forEach(line=>{
+    const pts = line.stations.map(s=>coords[s.id]).filter(Boolean);
+    if(pts.length<2) return;
+    const cum = cumulativeDistances(pts);
+    const proj = projectOntoRoute(lat,lon,pts,cum);
+    if(proj && (bestProj===null || proj.crossTrack < bestProj.crossTrack)){
+      bestLine=line; bestProj=proj; bestPts=pts; bestCum=cum;
+    }
+  });
+
+  if(!bestLine){
+    setStatus('Konum aktif · hat verisi bekleniyor' + (navigator.onLine?'':' (çevrimdışı)'), 'ok');
+    return;
+  }
+  if(bestProj.crossTrack > 3000){
+    // hatta çok uzaksa (hattan 3km+) tahmin gösterme
+    $('nextName').textContent = '—';
+    $('nextDist').textContent = '';
+    $('nextEta').textContent = 'Hat üzerinde değil';
+    setStatus('Konum aktif · bilinen hatta değil' + (navigator.onLine?'':' (çevrimdışı)'), 'ok');
+    return;
+  }
+
+  const lid = bestLine.id;
+  if(lastProgress[lid]!=null){
+    const delta = bestProj.progress - lastProgress[lid];
+    if(Math.abs(delta) > 15){
+      const dir = delta>0 ? 1 : -1;
+      lockedDirection[lid] = (lockedDirection[lid]==null) ? dir : (lockedDirection[lid]*0.8 + dir*0.2 > 0 ? 1 : -1);
+    }
+  }
+  lastProgress[lid] = bestProj.progress;
+  const dir = lockedDirection[lid] || 1;
+  const stations = bestLine.stations.filter(s=>coords[s.id]);
+
+  let nextIdx;
+  if(dir===1){ nextIdx = bestCum.findIndex(c=>c > bestProj.progress); if(nextIdx===-1) nextIdx = bestCum.length-1; }
+  else { nextIdx=0; for(let i=bestCum.length-1;i>=0;i--){ if(bestCum[i] < bestProj.progress){ nextIdx=i; break; } } }
+
+  const distToNext = Math.abs(bestCum[nextIdx] - bestProj.progress);
+  const eta = (smoothedSpeed && smoothedSpeed>0.3) ? distToNext/smoothedSpeed : null;
+
+  $('nextName').textContent = stations[nextIdx].name;
+  $('nextDist').textContent = fmtKm(distToNext);
+  $('nextEta').textContent = fmtEta(eta);
+
+  const accTxt = accuracy ? ` · ±${Math.round(accuracy)}m` : '';
+  setStatus(bestLine.name + accTxt + (navigator.onLine ? '' : ' · çevrimdışı'), 'ok');
+}
+
+function onFixError(err){
+  setStatus('Konum hatası: ' + (err.message||'izin verilmedi') + ' — açık alanda tekrar dener', 'warn');
+}
+
+// ---------------- init ----------------
+(async function init(){
+  await loadCoords();
+  const seen = new Set();
+  LINES.forEach(l=> l.stations.forEach(s=>{
+    if(!seen.has(s.id) && coords[s.id]){ seen.add(s.id); drawStation(s.id, s.name); }
+  }));
+  drawAllLines();
+  fitToStations();
+
+  if(Object.keys(coords).length === 0){
+    setStatus('İstasyon konumları indiriliyor (ilk kullanım, internet gerekir)…', 'warn');
+  } else {
+    setStatus('Hazır', 'ok');
+  }
+  geocodeMissing();
+
+  window.addEventListener('online', geocodeMissing);
+
+  if(!navigator.geolocation){
+    setStatus('Bu cihazda konum servisi yok', 'warn');
+    return;
+  }
+  navigator.geolocation.watchPosition(onFix, onFixError, { enableHighAccuracy:true, maximumAge:1000, timeout:20000 });
+})();
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').catch(()=>{ /* sw yoksa sessiz geç, uygulama yine çalışır */ });
+}
+
+})();
+</script>
+</body>
+</html>
